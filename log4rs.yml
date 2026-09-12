@@ -1,0 +1,16 @@
+appenders:
+  stdout:
+    kind: rolling_file
+    path: "log/bot.log"
+    encoder:
+      pattern: "{d} - {l} - {f}:{L} - {m}{n}"
+    policy:
+      trigger:
+        kind: size
+        limit: 200 mb
+      roller:
+        kind: delete
+root:
+  level: warn
+  appenders:
+    - stdout

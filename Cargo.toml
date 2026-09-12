@@ -1,0 +1,16 @@
+[package]
+name = "v2ray_geoip"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ping = { version = "0.9.0" , features = ["tokio"]}
+tokio = { version = "1.8", features = ["rt-multi-thread", "macros"] }
+log = "0.4"
+pretty_env_logger = "0.5"
+serde = { version = "1.0.229" , features = ["derive"]}
+rusqlite = { version = "0.40.2" , features = ["chrono", "bundled"]}
+config = "0.15.25"
+clokwerk = { version = "0.4.0" , features = ["async"]}
+log4rs = "1.4.0"
+
