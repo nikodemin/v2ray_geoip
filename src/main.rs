@@ -8,7 +8,6 @@ use clokwerk::Interval;
 use config;
 use futures::StreamExt;
 use log::{error, info, warn};
-use rusqlite::Connection;
 use serde::{Deserialize, Deserializer};
 use std::error::Error;
 use std::fmt::Formatter;
@@ -19,6 +18,7 @@ use std::time::Duration;
 use tokio::runtime;
 use tokio::sync::RwLock;
 use tokio::task::JoinSet;
+use tokio_rusqlite::Connection;
 use tokio_stream as stream;
 
 mod dao;
@@ -43,8 +43,8 @@ async fn async_main() -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
     log4rs::init_file("log4rs.yml", Default::default())?;
     info!("Starting bot...");
 
-    let conn = Connection::open("./db.db3")?;
-    let dao = Arc::new(RwLock::new(Dao::new(conn)));
+    let conn = Connection::open("./db.db3").await?;
+    let dao = Arc::new(Dao::new(conn));
     let fetcher = Arc::new(Fetcher::new(conf.geo_base_url.clone()));
 
     let fetcher2 = fetcher.clone();
@@ -124,10 +124,9 @@ async fn async_main() -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
                                     })
                                     .collect();
 
-                                match dao3.write_owned().await.insert_batch(entries) {
-                                    Ok(val) => val,
-                                    Err(err) => error!("Failed to insert batch: {}", err),
-                                }
+                                dao3.insert_batch(entries)
+                                    .await
+                                    .unwrap_or_else(|err| error!("Failed to insert batch: {}", err))
                             }
                             Err(err) => error!("Failed to get geo: {}", err),
                         }
@@ -145,6 +144,8 @@ async fn async_main() -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
     //     scheduler.start();
     //     loop {}
     // });
+
+    pending::<()>().await;
 
     Ok(())
 }

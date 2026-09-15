@@ -1,7 +1,8 @@
 use crate::utils::now_secs;
-use rusqlite::{params, params_from_iter, Connection, Error, Result, Row};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
+use tokio_rusqlite::rusqlite::Error;
+use tokio_rusqlite::{Connection, Result, Row, params, params_from_iter};
 
 pub struct Dao {
     connection: Connection,
@@ -16,7 +17,7 @@ impl Dao {
 
     const SELECT_CLAUSE: &str = "e.id, e.url, e.ping, e.protocol, e.country_code, e.country, e.city, e.checked_at FROM entries e";
 
-    const MAPPER: fn(&Row) -> Result<ExistedEntry, Error> = |row: &Row| match (
+    const MAPPER: fn(&Row) -> std::result::Result<ExistedEntry, Error> = |row: &Row| match (
         row.get::<usize, Id>(0),
         row.get::<usize, String>(1),
         row.get::<usize, i32>(2),
@@ -75,110 +76,124 @@ pub struct ExistedEntry {
 }
 
 pub trait DaoOps {
-    fn init(&self) -> Result<(), Error>;
-    fn delete(&self, ids: Vec<Id>) -> Result<(), Error>;
-    fn insert_batch(&self, batch: Vec<Entry>) -> Result<(), Error>;
-    fn list_by_country_code(
+    async fn init(&self) -> Result<()>;
+    async fn delete(&self, ids: Vec<Id>) -> Result<()>;
+    async fn insert_batch(&self, batch: Vec<Entry>) -> Result<()>;
+    async fn list_by_country_code(
         &self,
         country_code: String,
         limit: Option<u32>,
         page: Option<u32>,
-    ) -> Result<Vec<ExistedEntry>, Error>;
+    ) -> Result<Vec<ExistedEntry>>;
 
-    fn list_except_last_period(&self, period: Duration) -> Result<Vec<ExistedEntry>, Error>;
+    async fn list_except_last_period(&self, period: Duration) -> Result<Vec<ExistedEntry>>;
 }
 
 impl DaoOps for Dao {
-    fn init(&self) -> Result<(), Error> {
-        self.connection.execute(
+    async fn init(&self) -> Result<()> {
+        self.connection.call(|c| c.execute(
             "CREATE TABLE IF NOT EXISTS entries (id INTEGER PRIMARY KEY, url, ping INTEGER, protocol VARCHAR, country_code VARCHAR, country VARCHAR, city VARCHAR)",
             (),
-        )?;
+        )).await?;
         Ok(())
     }
 
-    fn delete(&self, ids: Vec<Id>) -> Result<(), Error> {
+    async fn delete(&self, ids: Vec<Id>) -> Result<()> {
         let placeholders = std::iter::repeat("?")
             .take(ids.len())
             .collect::<Vec<_>>()
             .join(",");
 
-        let mut statement = self.connection.prepare(&format!(
-            "DELETE FROM entries WHERE id IN ({})",
-            placeholders
-        ))?;
-        statement.execute(params_from_iter(ids))?;
+        self.connection
+            .call(move |c| {
+                let mut statement = c.prepare(&format!(
+                    "DELETE FROM entries WHERE id IN ({})",
+                    placeholders
+                ))?;
+                statement.execute(params_from_iter(ids))
+            })
+            .await?;
         Ok(())
     }
 
-    fn insert_batch(&self, batch: Vec<Entry>) -> Result<(), Error> {
+    async fn insert_batch(&self, batch: Vec<Entry>) -> Result<()> {
         let num_params = 6;
         let placeholders = std::iter::repeat("(?, ?, ?, ?, ?, ?)")
             .take(batch.len())
             .collect::<Vec<_>>()
             .join(",");
 
-        let mut statement = self.connection.prepare(&format!(
-            "INSERT INTO entries(id, url, ping, protocol, country_code, country, city, checked_at) VALUES {}",
-            placeholders
-        ))?;
+        self.connection.call(move |c| {
+            let mut statement = c.prepare(&format!(
+                "INSERT INTO entries(id, url, ping, protocol, country_code, country, city, checked_at) VALUES {}",
+                placeholders
+            ))?;
 
-        batch
-            .into_iter()
-            .enumerate()
-            .fold(Ok(()), |acc, (i, entry)| {
-                acc.and_then(|_| statement.raw_bind_parameter(i * num_params + 1, "NULL"))
-                    .and_then(|_| statement.raw_bind_parameter(i * num_params + 2, entry.url))
-                    .and_then(|_| statement.raw_bind_parameter(i * num_params + 3, entry.ping))
-                    .and_then(|_| statement.raw_bind_parameter(i * num_params + 4, entry.protocol))
-                    .and_then(|_| {
-                        statement.raw_bind_parameter(i * num_params + 5, entry.country_code)
-                    })
-                    .and_then(|_| statement.raw_bind_parameter(i * num_params + 6, entry.country))
-                    .and_then(|_| statement.raw_bind_parameter(i * num_params + 7, entry.city))
-                    .and_then(|_| {
-                        statement.raw_bind_parameter(i * num_params + 8, entry.checked_at)
-                    })
-            })?;
+            batch
+                .into_iter()
+                .enumerate()
+                .fold(Ok(()), |acc, (i, entry)| {
+                    acc.and_then(|_| statement.raw_bind_parameter(i * num_params + 1, "NULL"))
+                        .and_then(|_| statement.raw_bind_parameter(i * num_params + 2, entry.url))
+                        .and_then(|_| statement.raw_bind_parameter(i * num_params + 3, entry.ping))
+                        .and_then(|_| statement.raw_bind_parameter(i * num_params + 4, entry.protocol))
+                        .and_then(|_| {
+                            statement.raw_bind_parameter(i * num_params + 5, entry.country_code)
+                        })
+                        .and_then(|_| statement.raw_bind_parameter(i * num_params + 6, entry.country))
+                        .and_then(|_| statement.raw_bind_parameter(i * num_params + 7, entry.city))
+                        .and_then(|_| {
+                            statement.raw_bind_parameter(i * num_params + 8, entry.checked_at)
+                        })
+                })?;
 
-        statement.raw_execute()?;
+            statement.raw_execute()
+                }).await?;
         Ok(())
     }
 
-    fn list_by_country_code(
+    async fn list_by_country_code(
         &self,
         country_code: String,
         limit: Option<u32>,
         page: Option<u32>,
-    ) -> Result<Vec<ExistedEntry>, Error> {
+    ) -> Result<Vec<ExistedEntry>> {
         match (limit, page) {
             (Some(l), Some(o)) => {
-                let mut s = self.connection.prepare(format!("SELECT {} WHERE LOWER(e.country_code) = LOWER(?1) ORDER BY e.ping ASC LIMIT ?2 OFFSET ?3", Self::SELECT_CLAUSE).as_str())?;
+                 self.connection.call(move |c|{
+                     let mut s =c.prepare(format!("SELECT {} WHERE LOWER(e.country_code) = LOWER(?1) ORDER BY e.ping ASC LIMIT ?2 OFFSET ?3", Self::SELECT_CLAUSE).as_str())?;
                 s.query_map(params![country_code, l, o], Self::MAPPER)?
                     .collect()
+            }).await
             }
             _ => {
-                let mut s = self.connection.prepare(
-                    format!(
-                        "SELECT {} WHERE LOWER(e.country_code) = LOWER(?1) ORDER BY e.ping ASC",
-                        Self::SELECT_CLAUSE
-                    )
-                    .as_str(),
-                )?;
-                s.query_map(params![country_code], Self::MAPPER)?.collect()
+                self.connection.call(move |c|{
+                    let mut s = c.prepare(
+                        format!(
+                            "SELECT {} WHERE LOWER(e.country_code) = LOWER(?1) ORDER BY e.ping ASC",
+                            Self::SELECT_CLAUSE
+                        )
+                            .as_str(),
+                    )?;
+                    s.query_map(params![country_code], Self::MAPPER)?.collect()
+                }).await
             }
         }
     }
 
-    fn list_except_last_period(&self, period: Duration) -> Result<Vec<ExistedEntry>, Error> {
+    async fn list_except_last_period(&self, period: Duration) -> Result<Vec<ExistedEntry>> {
         let less_that = (now_secs() - period.as_secs()).cast_signed();
-        let mut s = self.connection.prepare(
-            format!(
-                "SELECT {} WHERE e.checked_at < ?1 ORDER BY e.ping DESC",
-                Self::SELECT_CLAUSE
-            )
-            .as_str(),
-        )?;
-        s.query_map(params![less_that], Self::MAPPER)?.collect()
+        self.connection
+            .call(move |c| {
+                let mut s = c.prepare(
+                    format!(
+                        "SELECT {} WHERE e.checked_at < ?1 ORDER BY e.ping DESC",
+                        Self::SELECT_CLAUSE
+                    )
+                    .as_str(),
+                )?;
+                s.query_map(params![less_that], Self::MAPPER)?.collect()
+            })
+            .await
     }
 }

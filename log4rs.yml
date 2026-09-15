@@ -1,5 +1,9 @@
 appenders:
   stdout:
+    kind: console
+    encoder:
+      pattern: "{d} - {l} - {f}:{L} - {m}{n}"
+  file:
     kind: rolling_file
     path: "log/bot.log"
     encoder:
@@ -14,3 +18,4 @@ root:
   level: warn
   appenders:
     - stdout
+    - file
