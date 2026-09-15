@@ -1,3 +1,5 @@
-subs=[""]
+sub_groups=["https://github.com/barry-far/V2ray-Config/blob/main/Sub1.txt", "https://github.com/barry-far/V2ray-Config/blob/main/Sub2.txt"]
 geo_base_url="http://ip-api.com"
-default_recheck_period="30 m"
+batch_size=20
+recheck_period="30 m"
+update_period="30 m"
