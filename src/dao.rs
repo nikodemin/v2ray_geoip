@@ -20,7 +20,7 @@ impl Dao {
     const MAPPER: fn(&Row) -> std::result::Result<ExistedEntry, Error> = |row: &Row| match (
         row.get::<usize, Id>(0),
         row.get::<usize, String>(1),
-        row.get::<usize, i32>(2),
+        row.get::<usize, i64>(2),
         row.get::<usize, String>(3),
         row.get::<usize, String>(4),
         row.get::<usize, String>(5),
@@ -55,7 +55,7 @@ pub type Id = i64;
 #[derive(Debug, Clone, PartialEq, PartialOrd, Serialize, Deserialize, Eq, Ord)]
 pub struct Entry {
     pub url: String,
-    pub ping: i32,
+    pub ping: i64,
     pub protocol: String,
     pub country_code: String,
     pub country: String,
@@ -67,7 +67,7 @@ pub struct Entry {
 pub struct ExistedEntry {
     pub id: Id,
     pub url: String,
-    pub ping: i32,
+    pub ping: i64,
     pub protocol: String,
     pub country_code: String,
     pub country: String,
@@ -92,7 +92,7 @@ pub trait DaoOps {
 impl DaoOps for Dao {
     async fn init(&self) -> Result<()> {
         self.connection.call(|c| c.execute(
-            "CREATE TABLE IF NOT EXISTS entries (id INTEGER PRIMARY KEY, url, ping INTEGER, protocol VARCHAR, country_code VARCHAR, country VARCHAR, city VARCHAR)",
+            "CREATE TABLE IF NOT EXISTS entries (id INTEGER PRIMARY KEY, url VARCHAR, ping INTEGER, protocol VARCHAR, country_code VARCHAR, country VARCHAR, city VARCHAR, checked_at INTEGER)",
             (),
         )).await?;
         Ok(())
@@ -117,8 +117,8 @@ impl DaoOps for Dao {
     }
 
     async fn insert_batch(&self, batch: Vec<Entry>) -> Result<()> {
-        let num_params = 6;
-        let placeholders = std::iter::repeat("(?, ?, ?, ?, ?, ?)")
+        let num_params = 7;
+        let placeholders = std::iter::repeat("(NULL, ?, ?, ?, ?, ?, ?, ?)")
             .take(batch.len())
             .collect::<Vec<_>>()
             .join(",");
@@ -133,17 +133,16 @@ impl DaoOps for Dao {
                 .into_iter()
                 .enumerate()
                 .fold(Ok(()), |acc, (i, entry)| {
-                    acc.and_then(|_| statement.raw_bind_parameter(i * num_params + 1, "NULL"))
-                        .and_then(|_| statement.raw_bind_parameter(i * num_params + 2, entry.url))
-                        .and_then(|_| statement.raw_bind_parameter(i * num_params + 3, entry.ping))
-                        .and_then(|_| statement.raw_bind_parameter(i * num_params + 4, entry.protocol))
+                        acc.and_then(|_| statement.raw_bind_parameter(i * num_params + 1, entry.url))
+                        .and_then(|_| statement.raw_bind_parameter(i * num_params + 2, entry.ping))
+                        .and_then(|_| statement.raw_bind_parameter(i * num_params + 3, entry.protocol))
                         .and_then(|_| {
-                            statement.raw_bind_parameter(i * num_params + 5, entry.country_code)
+                            statement.raw_bind_parameter(i * num_params + 4, entry.country_code)
                         })
-                        .and_then(|_| statement.raw_bind_parameter(i * num_params + 6, entry.country))
-                        .and_then(|_| statement.raw_bind_parameter(i * num_params + 7, entry.city))
+                        .and_then(|_| statement.raw_bind_parameter(i * num_params + 5, entry.country))
+                        .and_then(|_| statement.raw_bind_parameter(i * num_params + 6, entry.city))
                         .and_then(|_| {
-                            statement.raw_bind_parameter(i * num_params + 8, entry.checked_at)
+                            statement.raw_bind_parameter(i * num_params + 7, entry.checked_at)
                         })
                 })?;
 
@@ -187,7 +186,7 @@ impl DaoOps for Dao {
             .call(move |c| {
                 let mut s = c.prepare(
                     format!(
-                        "SELECT {} WHERE e.checked_at < ?1 ORDER BY e.ping DESC",
+                        "SELECT {} WHERE e.checked_at <= ?1 ORDER BY e.ping DESC",
                         Self::SELECT_CLAUSE
                     )
                     .as_str(),
@@ -195,5 +194,61 @@ impl DaoOps for Dao {
                 s.query_map(params![less_that], Self::MAPPER)?.collect()
             })
             .await
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::thread::sleep;
+    use {prop::prelude::*, proptest as prop};
+
+    async fn init() -> Dao {
+        let conn: Connection = Connection::open_in_memory().await.unwrap();
+        let mut dao = Dao::new(conn);
+        dao.init().await.unwrap();
+        dao
+    }
+
+    fn entry() -> impl Strategy<Value = Entry> {
+        let url = prop::sample::select([
+            "hy2://1beb216e3f60aea9555dae60d219a5ca@152-69-231-175.liao.kdns.fr:50160/?sni=152-69-231-175.liao.kdns.fr#咕",
+            "hy2://14f7504c-bd01-4d88-bd42-80dc6bf6b202@samurai.h4ck.me:443/#芬兰",
+            "vmess://eyJ2IjoiMiIsInBzIjoiXHVkODNjXHVkZGZhXHVkODNjXHVkZGY4IEpvaW4rVGVsZWdyYW06QEZhcmFoX1ZQTiBcdWQ4M2NcdWRkZmFcdWQ4M2NcdWRkZjgiLCJhZGQiOiI4Mi4xOTguMjQ2LjIzMyIsInBvcnQiOiIxODAiLCJ0eXBlIjoibm9uZSIsImlkIjoiZDEzZmMyZjUtM2UwNS00Nzk1LTgxZWItNDQxNDNhMDllNTUyIiwiYWlkIjoiMCIsIm5ldCI6InRjcCIsInBhdGgiOiIvIiwiaG9zdCI6IiIsInRscyI6IiIsInNraXAtY2VydC12ZXJpZnkiOnRydWV9",
+            "vless://a8e3155b-ceb1-4fcb-bc0c-2e77ec005401@api.noneok.com:443?mode=gun&security=reality&encryption=none&authority=v2rayNplus--v2rayNplus--v2rayNplus&pbk=S8O8R938N960cpQfIIDXsJTxeGAkbVv6PlIqP0-d30w&type=grpc&serviceName=api.v1.StreamService&sni=api.noneok.com&sid=1ea59febb8d4fc8e#%D8%A7%DA%AF%D9%87%20%D9%85%DB%8C%D8%AE%D9%88%D8%A7%DB%8C%20%D9%82%D8%B7%D8%B9%20%D9%86%D8%B4%DB%8C%20%D8%AC%D9%88%DB%8C%D9%86%20%D8%B4%D9%88%20%3A%20%40farsiproxy",
+            "vless://8c561eb2-f643-49ce-b5b6-81690ec268c0@b2n.ir:2087?mode=auto&path=%2FFiShChIpS&security=tls&encryption=none&extra=%7B%22mode%22%3A%22auto%22%2C%22xPaddingBytes%22%3A%221-1%22%2C%22xPaddingObfsMode%22%3Atrue%2C%22xPaddingKey%22%3A%22ctx%22%2C%22xPaddingHeader%22%3A%22x-grpc-context%22%2C%22xPaddingMethod%22%3A%22tokenish%22%2C%22sessionIDPlacement%22%3A%22header%22%2C%22sessionIDKey%22%3A%22Idempotency-Key%22%2C%22seqPlacement%22%3A%22header%22%2C%22seqKey%22%3A%22Upload-Offset%22%2C%22sessionPlacement%22%3A%22header%22%2C%22sessionKey%22%3A%22Idempotency-Key%22%7D&insecure=0&host=fish.kaftarkakolbesarwifi.ir&fp=chrome&type=xhttp&allowInsecure=0&sni=fish.kaftarkakolbesarwifi.ir#%D8%A7%DA%AF%D9%87%20%D9%85%DB%8C%D8%AE%D9%88%D8%A7%DB%8C%20%D9%82%D8%B7%D8%B9%20%D9%86%D8%B4%DB%8C%20%D8%AC%D9%88%DB%8C%D9%86%20%D8%B4%D9%88%20%3A%20%40farsiproxy",
+        ].as_slice());
+        let country = prop::sample::select(["USA", "Canada", "Mexico"].as_slice());
+        let city = prop::sample::select(["New York", "Toronto", "Mexico City"].as_slice());
+        let country_code = prop::sample::select(["US", "EN", "FR"].as_slice());
+        let now = now_secs().cast_signed();
+
+        (url, country, city, country_code).prop_map(move |(url, country, city, country_code)| {
+            Entry {
+                url: url.to_string(),
+                country: country.to_string(),
+                city: city.to_string(),
+                ping: 0,
+                protocol: "".to_string(),
+                country_code: country_code.to_string(),
+                checked_at: now,
+            }
+        })
+    }
+
+    fn vec_gen<T: Strategy>(value: T) -> impl Strategy<Value = Vec<T::Value>> {
+        prop::collection::vec(value, 10)
+    }
+
+    proptest! {
+        #[test]
+        fn insert_and_list(entries in vec_gen(entry())) {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async {
+                let dao = init().await;
+                dao.insert_batch(entries.clone()).await.unwrap();
+                let res_entries = dao.list_except_last_period(Duration::ZERO).await.unwrap();
+                assert_eq!(res_entries.len(), entries.len());
+            })
+        }
     }
 }

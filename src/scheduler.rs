@@ -30,11 +30,13 @@ where
 
 pub trait SchedulerOps<F, T>
 where
-    F: 'static + FnMut() -> T + Send,
+    F: 'static + FnMut() -> T + Send + Clone,
     T: 'static + Future<Output = ()> + Send,
 {
     fn set_schedule(&mut self, period: Interval) -> ();
     fn start(&mut self) -> ();
+
+    async fn run_task(&mut self) -> ();
     fn stop(&mut self) -> ();
     fn set_runnable(&mut self, f: F);
 }
@@ -63,6 +65,11 @@ where
         }));
 
         self.is_running = true;
+    }
+
+    async fn run_task(&mut self) -> () {
+        let mut r = self.runnable.clone();
+        r().await;
     }
 
     fn stop(&mut self) -> () {

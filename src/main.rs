@@ -6,7 +6,7 @@ use crate::scheduler::{Scheduler, SchedulerOps};
 use crate::utils::{Wrapper, now_secs};
 use clokwerk::Interval;
 use config;
-use futures::StreamExt;
+use futures::{FutureExt, StreamExt, TryFutureExt};
 use log::{error, info, warn};
 use serde::{Deserialize, Deserializer};
 use std::error::Error;
@@ -41,109 +41,110 @@ async fn async_main() -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
         .try_deserialize()?;
 
     log4rs::init_file("log4rs.yml", Default::default())?;
-    info!("Starting bot...");
+    info!("Starting app...");
 
     let conn = Connection::open("./db.db3").await?;
     let dao = Arc::new(Dao::new(conn));
     let fetcher = Arc::new(Fetcher::new(conf.geo_base_url.clone()));
 
+    dao.init().await?;
+
     let fetcher2 = fetcher.clone();
     let dao2 = dao.clone();
-    tokio::task::spawn(async move {
-        let mut scheduler = Scheduler::new(
-            move || {
-                let fetcher3 = fetcher2.clone();
-                let dao3 = dao2.clone();
-                let sub_groups = conf.sub_groups.clone();
-                async move {
-                    let par_stream = stream::iter(sub_groups)
-                        .then(|group| {
-                            let fetcher4 = fetcher3.clone();
-                            async move {
-                                match fetcher4.get_subs(group.clone()).await {
-                                    Ok(value) => value,
-                                    Err(err) => {
-                                        error!(
-                                            "Failed to get subscriptions from {}, error: {}",
-                                            group, err
-                                        );
-                                        Vec::new()
-                                    }
+    let mut update_scheduler = Scheduler::new(
+        move || {
+            let fetcher3 = fetcher2.clone();
+            let dao3 = dao2.clone();
+            let sub_groups = conf.sub_groups.clone();
+            async move {
+                let par_stream = stream::iter(sub_groups)
+                    .then(|group| {
+                        let fetcher4 = fetcher3.clone();
+                        async move {
+                            match fetcher4.get_subs(group.clone()).await {
+                                Ok(value) => value,
+                                Err(err) => {
+                                    error!(
+                                        "Failed to get subscriptions from {}, error: {}",
+                                        group, err
+                                    );
+                                    Vec::new()
                                 }
                             }
-                        })
-                        .flat_map(|v| stream::iter(v))
-                        .map(|sub| {
-                            let fetcher4 = fetcher3.clone();
-                            async move {
-                                match Fetcher::parse_link_to_ip(&sub) {
-                                    Some(ip) => fetcher4
+                        }
+                    })
+                    .flat_map(|v| stream::iter(v))
+                    .map(|sub| {
+                        let fetcher4 = fetcher3.clone();
+                        match Fetcher::parse_link_to_ip(&sub) {
+                            Some(ip) => {
+                                info!("Pinging ip: {}", ip);
+                                async move {
+                                    fetcher4
                                         .ping(ip)
-                                        .await
                                         .inspect_err(|err| {
-                                            error!("Unreachable sub: {}, err:{}", sub, err)
+                                            error!("Unreachable sub: {}, err: {}", sub, err)
                                         })
                                         .ok()
-                                        .map(|ping| (sub, ip, ping)),
-                                    None => {
-                                        warn!("Failed to parse sub: {}", sub);
-                                        None
-                                    }
+                                        .map(|ping| {
+                                            info!("Ping result: {}ms", ping);
+                                            (sub, ip, ping)
+                                        })
                                 }
+                                .boxed()
                             }
-                        })
-                        .buffer_unordered(conf.batch_size)
-                        .filter_map(async |e| e)
-                        .chunks(conf.batch_size);
-
-                    tokio::pin!(par_stream);
-
-                    while let Some(batch) = par_stream.next().await {
-                        match fetcher3
-                            .get_geo(batch.iter().map(|(sub, ip, ping)| ip.to_string()).collect())
-                            .await
-                        {
-                            Ok(res) => {
-                                let now = now_secs();
-                                let entries: Vec<Entry> = res
-                                    .into_iter()
-                                    .map(move |geo| {
-                                        let (sub, io, ping) = batch
-                                            .iter()
-                                            .find(|(sub, ip, ping)| ip.to_string() == geo.query)
-                                            .expect("Illegal state");
-                                        Entry {
-                                            url: sub.clone(),
-                                            ping: ping.clone().cast_signed(),
-                                            protocol: "".to_string(),
-                                            country_code: geo.country_code,
-                                            country: geo.country,
-                                            city: geo.city,
-                                            checked_at: now.cast_signed(),
-                                        }
-                                    })
-                                    .collect();
-
-                                dao3.insert_batch(entries)
-                                    .await
-                                    .unwrap_or_else(|err| error!("Failed to insert batch: {}", err))
+                            None => {
+                                warn!("Failed to parse sub: {}", sub);
+                                futures::future::ready(None).boxed()
                             }
-                            Err(err) => error!("Failed to get geo: {}", err),
                         }
+                    })
+                    .buffer_unordered(conf.batch_size)
+                    .filter_map(async |e| e)
+                    .chunks(conf.batch_size);
+
+                tokio::pin!(par_stream);
+
+                while let Some(batch) = par_stream.next().await {
+                    match fetcher3
+                        .get_geo(batch.iter().map(|(sub, ip, ping)| ip.to_string()).collect())
+                        .await
+                    {
+                        Ok(res) => {
+                            let now = now_secs();
+                            let entries: Vec<Entry> = res
+                                .into_iter()
+                                .map(move |geo| {
+                                    let (sub, io, ping) = batch
+                                        .iter()
+                                        .find(|(sub, ip, ping)| ip.to_string() == geo.query)
+                                        .expect("Illegal state");
+                                    Entry {
+                                        url: sub.clone(),
+                                        ping: ping.clone(),
+                                        protocol: "".to_string(),
+                                        country_code: geo.country_code,
+                                        country: geo.country,
+                                        city: geo.city,
+                                        checked_at: now.cast_signed(),
+                                    }
+                                })
+                                .collect();
+
+                            info!("Inserting batch");
+                            dao3.insert_batch(entries)
+                                .await
+                                .unwrap_or_else(|err| error!("Failed to insert batch: {}", err))
+                        }
+                        Err(err) => error!("Failed to get geo: {}", err),
                     }
                 }
-            },
-            conf.update_period.0,
-        );
-        scheduler.start();
-
-        pending::<()>().await;
-    });
-    // tokio::task::spawn(async move {
-    //     let mut scheduler = Scheduler::new(|| {}, conf.recheck_period.0);
-    //     scheduler.start();
-    //     loop {}
-    // });
+            }
+        },
+        conf.update_period.0,
+    );
+    update_scheduler.start();
+    update_scheduler.run_task().await;
 
     pending::<()>().await;
 

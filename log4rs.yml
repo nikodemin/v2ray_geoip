@@ -5,7 +5,7 @@ appenders:
       pattern: "{d} - {l} - {f}:{L} - {m}{n}"
   file:
     kind: rolling_file
-    path: "log/bot.log"
+    path: "log/app.log"
     encoder:
       pattern: "{d} - {l} - {f}:{L} - {m}{n}"
     policy:
@@ -15,7 +15,7 @@ appenders:
       roller:
         kind: delete
 root:
-  level: warn
+  level: info
   appenders:
     - stdout
     - file
