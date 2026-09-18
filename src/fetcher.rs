@@ -87,7 +87,6 @@ impl FetcherOps for Fetcher {
     fn ping(&self, ip: IpAddr) -> Result<i64, ping_mod::Error> {
         ping_mod::new(ip)
             .timeout(Duration::from_secs(5))
-            .
             .send()
             .map(|r| r.rtt.as_millis() as i64)
     }
