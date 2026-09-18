@@ -49,12 +49,10 @@ async fn async_main() -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
 
     dao.init().await?;
 
-    let fetcher2 = fetcher.clone();
-    let dao2 = dao.clone();
     let mut update_scheduler = Scheduler::new(
         move || {
-            let fetcher3 = fetcher2.clone();
-            let dao3 = dao2.clone();
+            let fetcher3 = fetcher.clone();
+            let dao3 = dao.clone();
             let sub_groups = conf.sub_groups.clone();
             async move {
                 let par_stream = stream::iter(sub_groups)
@@ -80,17 +78,18 @@ async fn async_main() -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
                             Some(ip) => {
                                 info!("Pinging ip: {}", ip);
                                 async move {
-                                    fetcher4
-                                        .ping(ip)
-                                        .inspect_err(|err| {
-                                            error!("Unreachable sub: {}, err: {}", sub, err)
-                                        })
-                                        .ok()
-                                        .map(|ping| {
-                                            info!("Ping result: {}ms", ping);
-                                            (sub, ip, ping)
-                                        })
+                                    fetcher4.ping(ip).map(move |ping| match ping {
+                                        Ok(p) => {
+                                            info!("Ping result: {}ms", p);
+                                            Some((sub, ip, p))
+                                        }
+                                        Err(err) => {
+                                            error!("Unreachable sub: {}, err: {}", sub, err);
+                                            None
+                                        }
+                                    })
                                 }
+                                .flatten()
                                 .boxed()
                             }
                             None => {

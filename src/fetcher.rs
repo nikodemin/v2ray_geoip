@@ -1,4 +1,5 @@
 use dns_lookup::lookup_host;
+use futures::FutureExt;
 use ping as ping_mod;
 use regex::Regex;
 use reqwest::{Client, Error};
@@ -61,7 +62,7 @@ pub struct GeoResponse {
 
 pub trait FetcherOps {
     async fn get_subs(&self, url: String) -> Result<Vec<String>, Error>;
-    fn ping(&self, ip: IpAddr) -> Result<i64, ping_mod::Error>;
+    async fn ping(&self, ip: IpAddr) -> Result<i64, ping_mod::Error>;
     async fn get_geo(&self, ips: Vec<String>) -> Result<Vec<GeoResponse>, Error>;
 }
 
@@ -84,11 +85,14 @@ impl FetcherOps for Fetcher {
             .collect())
     }
 
-    fn ping(&self, ip: IpAddr) -> Result<i64, ping_mod::Error> {
-        ping_mod::new(ip)
-            .timeout(Duration::from_secs(5))
-            .send()
-            .map(|r| r.rtt.as_millis() as i64)
+    fn ping(&self, ip: IpAddr) -> impl use<> + Future<Output = Result<i64, ping_mod::Error>> {
+        async move {
+            ping_mod::new(ip)
+                .timeout(Duration::from_secs(5))
+                .send_async()
+                .await
+                .map(|r| r.rtt.as_millis() as i64)
+        }
     }
 
     async fn get_geo(&self, ips: Vec<String>) -> Result<Vec<GeoResponse>, Error> {
