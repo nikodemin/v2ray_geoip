@@ -1,6 +1,8 @@
 use crate::utils::now_secs;
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
+use tokio_rusqlite::fallible_iterator::{FallibleIterator, IteratorExt};
 use tokio_rusqlite::rusqlite::Error;
 use tokio_rusqlite::{Connection, Result, Row, params, params_from_iter};
 
@@ -79,12 +81,26 @@ pub trait DaoOps {
     async fn init(&self) -> Result<()>;
     async fn delete(&self, ids: Vec<Id>) -> Result<()>;
     async fn insert_batch(&self, batch: Vec<Entry>) -> Result<()>;
+    async fn list(
+        &self,
+        limit: u32,
+        page: Option<u32>,
+    ) -> Result<Vec<ExistedEntry>>;
     async fn list_by_country_code(
         &self,
         country_code: String,
-        limit: Option<u32>,
+        limit: u32,
         page: Option<u32>,
     ) -> Result<Vec<ExistedEntry>>;
+    async fn list_by_country_code_and_city(
+        &self,
+        country_code: String,
+        city: String,
+        limit: u32,
+        page: Option<u32>,
+    ) -> Result<Vec<ExistedEntry>>;
+
+    async fn get_county_codes_to_cities(&self) -> Result<HashMap<String, HashSet<String>>>;
 
     async fn list_except_last_period(&self, period: Duration) -> Result<Vec<ExistedEntry>>;
 }
@@ -151,33 +167,102 @@ impl DaoOps for Dao {
         Ok(())
     }
 
+    async fn list(&self, limit: u32, page: Option<u32>) -> Result<Vec<ExistedEntry>> {
+        match page {
+            Some(p) => {
+                self.connection.call(move |c|{
+                    let mut s =c.prepare(format!("SELECT {} ORDER BY e.ping ASC LIMIT ?1 OFFSET ?2", Self::SELECT_CLAUSE).as_str())?;
+                    s.query_map(params![limit, p], Self::MAPPER)?
+                        .collect()
+                }).await
+            }
+            None => {
+                self.connection.call(move |c|{
+                    let mut s =c.prepare(format!("SELECT {} ORDER BY e.ping ASC LIMIT ?1", Self::SELECT_CLAUSE).as_str())?;
+                    s.query_map(params![limit], Self::MAPPER)?
+                        .collect()
+                }).await
+            }
+        }
+    }
+
     async fn list_by_country_code(
         &self,
         country_code: String,
-        limit: Option<u32>,
+        limit: u32,
         page: Option<u32>,
     ) -> Result<Vec<ExistedEntry>> {
-        match (limit, page) {
-            (Some(l), Some(o)) => {
+        match page {
+            Some(o) => {
                  self.connection.call(move |c|{
                      let mut s =c.prepare(format!("SELECT {} WHERE LOWER(e.country_code) = LOWER(?1) ORDER BY e.ping ASC LIMIT ?2 OFFSET ?3", Self::SELECT_CLAUSE).as_str())?;
-                s.query_map(params![country_code, l, o], Self::MAPPER)?
+                s.query_map(params![country_code, limit, o], Self::MAPPER)?
                     .collect()
             }).await
             }
-            _ => {
+            None => {
                 self.connection.call(move |c|{
                     let mut s = c.prepare(
                         format!(
-                            "SELECT {} WHERE LOWER(e.country_code) = LOWER(?1) ORDER BY e.ping ASC",
+                            "SELECT {} WHERE LOWER(e.country_code) = LOWER(?1) ORDER BY e.ping ASC LIMIT ?2",
                             Self::SELECT_CLAUSE
                         )
                             .as_str(),
                     )?;
-                    s.query_map(params![country_code], Self::MAPPER)?.collect()
+                    s.query_map(params![country_code, limit], Self::MAPPER)?.collect()
                 }).await
             }
         }
+    }
+
+    async fn list_by_country_code_and_city(
+        &self,
+        country_code: String,
+        city: String,
+        limit: u32,
+        page: Option<u32>,
+    ) -> Result<Vec<ExistedEntry>> {
+        match page {
+            Some(o) => {
+                self.connection.call(move |c|{
+                    let mut s =c.prepare(format!("SELECT {} WHERE LOWER(e.country_code) = LOWER(?1) AND LOWER(e.city) = LOWER(?2) ORDER BY e.ping ASC LIMIT ?3 OFFSET ?4", Self::SELECT_CLAUSE).as_str())?;
+                    s.query_map(params![country_code, city, limit, o], Self::MAPPER)?
+                        .collect()
+                }).await
+            }
+           None => {
+                self.connection.call(move |c|{
+                    let mut s = c.prepare(
+                        format!(
+                            "SELECT {} WHERE LOWER(e.country_code) = LOWER(?1) AND LOWER(e.city) = LOWER(?2) ORDER BY e.ping ASC LIMIT ?3",
+                            Self::SELECT_CLAUSE
+                        )
+                            .as_str(),
+                    )?;
+                    s.query_map(params![country_code, city, limit], Self::MAPPER)?.collect()
+                }).await
+            }
+        }
+    }
+
+    async fn get_county_codes_to_cities(&self) -> Result<HashMap<String, HashSet<String>>> {
+        self.connection
+            .call(|c| {
+                let mut res = HashMap::new();
+                let mut s = c.prepare("SELECT DISTINCT e.country_code, e.city FROM entries e")?;
+                s.query_map((), |row| {
+                    match (row.get::<usize, String>(0), row.get::<usize, String>(1)) {
+                        (Ok(cc), Ok(city)) => Ok((cc, city)),
+                        _ => Err(Error::QueryReturnedNoRows),
+                    }
+                })?
+                .filter_map(|e| e.ok())
+                .for_each(|(cc, city)| {
+                    res.entry(cc).or_insert_with(HashSet::new).insert(city);
+                });
+                Ok(res)
+            })
+            .await
     }
 
     async fn list_except_last_period(&self, period: Duration) -> Result<Vec<ExistedEntry>> {
@@ -248,6 +333,37 @@ mod tests {
                 dao.insert_batch(entries.clone()).await.unwrap();
                 let res_entries = dao.list_except_last_period(Duration::ZERO).await.unwrap();
                 assert_eq!(res_entries.len(), entries.len());
+            })
+        }
+
+        #[test]
+        fn insert_and_list_cc_and_city(entries in vec_gen(entry())) {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async {
+                let dao = init().await;
+                dao.insert_batch(entries.clone()).await.unwrap();
+                let res_entries = dao.get_county_codes_to_cities().await.unwrap();
+                let mut cc_cities  = HashMap::new();
+                entries.into_iter().for_each(|e|{
+                    cc_cities.entry(e.country_code).or_insert_with(HashSet::new).insert(e.city);
+                });
+
+                assert_eq!(res_entries, cc_cities);
+            })
+        }
+
+        #[test]
+        fn insert_and_delete(entries in vec_gen(entry())) {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async {
+                let dao = init().await;
+                dao.insert_batch(entries.clone()).await.unwrap();
+                let inserted:HashSet<Id> = dao.list_except_last_period(Duration::ZERO).await.unwrap().into_iter().map(|e|e.id).collect();
+                let to_del: HashSet<Id> = inserted.clone().into_iter().skip(2).take(4).collect();
+                dao.delete(to_del.clone().into_iter().collect()).await.unwrap();
+                let res: HashSet<Id> = dao.list_except_last_period(Duration::ZERO).await.unwrap().iter().map(|e|e.id).collect();
+
+                assert_eq!(res, inserted.difference(&to_del).cloned().collect());
             })
         }
     }

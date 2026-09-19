@@ -1,9 +1,13 @@
 extern crate core;
 
+use crate::api::Api;
 use crate::dao::{Dao, DaoOps, Entry};
 use crate::fetcher::{Fetcher, FetcherOps, GeoResponse};
 use crate::scheduler::{Scheduler, SchedulerOps};
 use crate::utils::{Wrapper, now_secs};
+use axum::Router;
+use axum::extract::Query;
+use axum::routing::get;
 use clokwerk::Interval;
 use config;
 use futures::{FutureExt, StreamExt, TryFutureExt};
@@ -21,6 +25,7 @@ use tokio::task::JoinSet;
 use tokio_rusqlite::Connection;
 use tokio_stream as stream;
 
+mod api;
 mod dao;
 mod fetcher;
 mod scheduler;
@@ -31,9 +36,11 @@ pub struct Conf {
     sub_groups: Vec<String>,
     geo_base_url: String,
     batch_size: usize,
+    port: u16,
     recheck_period: Wrapper<Interval>,
     update_period: Wrapper<Interval>,
 }
+
 async fn async_main() -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
     let conf: Conf = config::Config::builder()
         .add_source(config::File::with_name("conf.toml"))
@@ -46,6 +53,11 @@ async fn async_main() -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
     let conn = Connection::open("./db.db3").await?;
     let dao = Arc::new(Dao::new(conn));
     let fetcher = Arc::new(Fetcher::new(conf.geo_base_url.clone()));
+
+    let router = Router::new()
+        .route("/subs", get(Api::get_subs))
+        .route("/dict", get(Api::get_cc_to_city))
+        .with_state(Api::new(dao.clone()));
 
     dao.init().await?;
 
@@ -60,7 +72,10 @@ async fn async_main() -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
                         let fetcher4 = fetcher3.clone();
                         async move {
                             match fetcher4.get_subs(group.clone()).await {
-                                Ok(value) => value,
+                                Ok(value) => {
+                                    info!("Got sub group: {}, sub count: {}", group, value.len());
+                                    value
+                                }
                                 Err(err) => {
                                     error!(
                                         "Failed to get subscriptions from {}, error: {}",
@@ -143,9 +158,10 @@ async fn async_main() -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
         conf.update_period.0,
     );
     update_scheduler.start();
-    update_scheduler.run_task().await;
+    tokio::spawn(update_scheduler.run_task());
 
-    pending::<()>().await;
+    let listener = tokio::net::TcpListener::bind(("0.0.0.0", conf.port)).await.unwrap();
+    axum::serve(listener, router).await?;
 
     Ok(())
 }

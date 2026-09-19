@@ -12,7 +12,7 @@ serde = { version = "1.0.229" , features = ["derive"]}
 config = "0.15.25"
 clokwerk = { version = "0.4.0" , features = ["async"]}
 log4rs = "1.4.0"
-axum = "0.8.9"
+axum = { version = "0.8.9", features = ["macros"]}
 reqwest = { version = "0.13.5", features = ["json"]}
 regex = "1.13.1"
 tokio-stream = "0.1.19"
