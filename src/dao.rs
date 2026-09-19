@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 use tokio_rusqlite::fallible_iterator::{FallibleIterator, IteratorExt};
 use tokio_rusqlite::rusqlite::Error;
-use tokio_rusqlite::{Connection, Result, Row, params, params_from_iter};
+use tokio_rusqlite::{params, params_from_iter, Connection, Result, Row};
 
 pub struct Dao {
     connection: Connection,
@@ -94,7 +94,7 @@ impl Into<Entry> for ExistedEntry {
 pub trait DaoOps {
     async fn init(&self) -> Result<()>;
     async fn delete(&self, ids: Vec<Id>) -> Result<()>;
-    async fn insert_batch(&self, batch: Vec<Entry>) -> Result<()>;
+    async fn upsert_batch(&self, batch: Vec<Entry>) -> Result<()>;
     async fn list(&self, limit: u32, page: Option<u32>) -> Result<Vec<ExistedEntry>>;
     async fn list_by_country_code(
         &self,
@@ -120,7 +120,8 @@ pub trait DaoOps {
 impl DaoOps for Dao {
     async fn init(&self) -> Result<()> {
         self.connection.call(|c| c.execute(
-            "CREATE TABLE IF NOT EXISTS entries (id INTEGER PRIMARY KEY, url VARCHAR, ping INTEGER, protocol VARCHAR, country_code VARCHAR, country VARCHAR, city VARCHAR, checked_at INTEGER)",
+            "CREATE TABLE IF NOT EXISTS entries (id INTEGER PRIMARY KEY, url VARCHAR UNIQUE, ping INTEGER,\
+             protocol VARCHAR, country_code VARCHAR, country VARCHAR, city VARCHAR, checked_at INTEGER)",
             (),
         )).await?;
         Ok(())
@@ -144,7 +145,7 @@ impl DaoOps for Dao {
         Ok(())
     }
 
-    async fn insert_batch(&self, batch: Vec<Entry>) -> Result<()> {
+    async fn upsert_batch(&self, batch: Vec<Entry>) -> Result<()> {
         let num_params = 7;
         let placeholders = std::iter::repeat("(NULL, ?, ?, ?, ?, ?, ?, ?)")
             .take(batch.len())
@@ -153,7 +154,9 @@ impl DaoOps for Dao {
 
         self.connection.call(move |c| {
             let mut statement = c.prepare(&format!(
-                "INSERT INTO entries(id, url, ping, protocol, country_code, country, city, checked_at) VALUES {}",
+                "INSERT INTO entries(id, url, ping, protocol, country_code, country, city, checked_at) VALUES {}\
+                 ON CONFLICT(url) DO UPDATE SET ping=EXCLUDED.ping, protocol=EXCLUDED.protocol, \
+                 country_code=EXCLUDED.country_code, country=EXCLUDED.country, city=EXCLUDED.city, checked_at=EXCLUDED.checked_at",
                 placeholders
             ))?;
 
@@ -221,7 +224,8 @@ impl DaoOps for Dao {
         match page {
             Some(o) => {
                  self.connection.call(move |c|{
-                     let mut s =c.prepare(format!("SELECT {} WHERE LOWER(e.country_code) = LOWER(?1) ORDER BY e.ping ASC LIMIT ?2 OFFSET ?3", Self::SELECT_CLAUSE).as_str())?;
+                     let mut s =c.prepare(format!("SELECT {} WHERE LOWER(e.country_code) = LOWER(?1) \
+                     ORDER BY e.ping ASC LIMIT ?2 OFFSET ?3", Self::SELECT_CLAUSE).as_str())?;
                 s.query_map(params![country_code, limit, o], Self::MAPPER)?
                     .collect()
             }).await
@@ -251,7 +255,8 @@ impl DaoOps for Dao {
         match page {
             Some(o) => {
                 self.connection.call(move |c|{
-                    let mut s =c.prepare(format!("SELECT {} WHERE LOWER(e.country_code) = LOWER(?1) AND LOWER(e.city) = LOWER(?2) ORDER BY e.ping ASC LIMIT ?3 OFFSET ?4", Self::SELECT_CLAUSE).as_str())?;
+                    let mut s =c.prepare(format!("SELECT {} WHERE LOWER(e.country_code) = LOWER(?1) AND \
+                    LOWER(e.city) = LOWER(?2) ORDER BY e.ping ASC LIMIT ?3 OFFSET ?4", Self::SELECT_CLAUSE).as_str())?;
                     s.query_map(params![country_code, city, limit, o], Self::MAPPER)?
                         .collect()
                 }).await
@@ -260,7 +265,8 @@ impl DaoOps for Dao {
                 self.connection.call(move |c|{
                     let mut s = c.prepare(
                         format!(
-                            "SELECT {} WHERE LOWER(e.country_code) = LOWER(?1) AND LOWER(e.city) = LOWER(?2) ORDER BY e.ping ASC LIMIT ?3",
+                            "SELECT {} WHERE LOWER(e.country_code) = LOWER(?1) AND LOWER(e.city) = LOWER(?2) \
+                            ORDER BY e.ping ASC LIMIT ?3",
                             Self::SELECT_CLAUSE
                         )
                             .as_str(),
@@ -311,8 +317,20 @@ impl DaoOps for Dao {
         self.connection
             .call(move |c| {
                 for e in entries {
-                    let mut s = c.prepare("UPDATE entries SET url=?1, ping=?2, country_code=?3, country=?4, city=?5, protocol=?6, checked_at=?7 WHERE id = ?8")?;
-                    s.execute(params![e.url, e.ping, e.country_code, e.country, e.city, e.protocol, e.checked_at, e.id])?;
+                    let mut s = c.prepare(
+                        "UPDATE entries SET url=?1, ping=?2, country_code=?3,\
+                     country=?4, city=?5, protocol=?6, checked_at=?7 WHERE id = ?8",
+                    )?;
+                    s.execute(params![
+                        e.url,
+                        e.ping,
+                        e.country_code,
+                        e.country,
+                        e.city,
+                        e.protocol,
+                        e.checked_at,
+                        e.id
+                    ])?;
                 }
                 Ok(())
             })
@@ -322,6 +340,8 @@ impl DaoOps for Dao {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::distr::{Alphanumeric, SampleString};
+    use rand::random;
     use std::thread::sleep;
     use {prop::prelude::*, proptest as prop};
 
@@ -333,21 +353,16 @@ mod tests {
     }
 
     fn entry() -> impl Strategy<Value = Entry> {
-        let url = prop::sample::select([
-            "hy2://1beb216e3f60aea9555dae60d219a5ca@152-69-231-175.liao.kdns.fr:50160/?sni=152-69-231-175.liao.kdns.fr#咕",
-            "hy2://14f7504c-bd01-4d88-bd42-80dc6bf6b202@samurai.h4ck.me:443/#芬兰",
-            "vmess://eyJ2IjoiMiIsInBzIjoiXHVkODNjXHVkZGZhXHVkODNjXHVkZGY4IEpvaW4rVGVsZWdyYW06QEZhcmFoX1ZQTiBcdWQ4M2NcdWRkZmFcdWQ4M2NcdWRkZjgiLCJhZGQiOiI4Mi4xOTguMjQ2LjIzMyIsInBvcnQiOiIxODAiLCJ0eXBlIjoibm9uZSIsImlkIjoiZDEzZmMyZjUtM2UwNS00Nzk1LTgxZWItNDQxNDNhMDllNTUyIiwiYWlkIjoiMCIsIm5ldCI6InRjcCIsInBhdGgiOiIvIiwiaG9zdCI6IiIsInRscyI6IiIsInNraXAtY2VydC12ZXJpZnkiOnRydWV9",
-            "vless://a8e3155b-ceb1-4fcb-bc0c-2e77ec005401@api.noneok.com:443?mode=gun&security=reality&encryption=none&authority=v2rayNplus--v2rayNplus--v2rayNplus&pbk=S8O8R938N960cpQfIIDXsJTxeGAkbVv6PlIqP0-d30w&type=grpc&serviceName=api.v1.StreamService&sni=api.noneok.com&sid=1ea59febb8d4fc8e#%D8%A7%DA%AF%D9%87%20%D9%85%DB%8C%D8%AE%D9%88%D8%A7%DB%8C%20%D9%82%D8%B7%D8%B9%20%D9%86%D8%B4%DB%8C%20%D8%AC%D9%88%DB%8C%D9%86%20%D8%B4%D9%88%20%3A%20%40farsiproxy",
-            "vless://8c561eb2-f643-49ce-b5b6-81690ec268c0@b2n.ir:2087?mode=auto&path=%2FFiShChIpS&security=tls&encryption=none&extra=%7B%22mode%22%3A%22auto%22%2C%22xPaddingBytes%22%3A%221-1%22%2C%22xPaddingObfsMode%22%3Atrue%2C%22xPaddingKey%22%3A%22ctx%22%2C%22xPaddingHeader%22%3A%22x-grpc-context%22%2C%22xPaddingMethod%22%3A%22tokenish%22%2C%22sessionIDPlacement%22%3A%22header%22%2C%22sessionIDKey%22%3A%22Idempotency-Key%22%2C%22seqPlacement%22%3A%22header%22%2C%22seqKey%22%3A%22Upload-Offset%22%2C%22sessionPlacement%22%3A%22header%22%2C%22sessionKey%22%3A%22Idempotency-Key%22%7D&insecure=0&host=fish.kaftarkakolbesarwifi.ir&fp=chrome&type=xhttp&allowInsecure=0&sni=fish.kaftarkakolbesarwifi.ir#%D8%A7%DA%AF%D9%87%20%D9%85%DB%8C%D8%AE%D9%88%D8%A7%DB%8C%20%D9%82%D8%B7%D8%B9%20%D9%86%D8%B4%DB%8C%20%D8%AC%D9%88%DB%8C%D9%86%20%D8%B4%D9%88%20%3A%20%40farsiproxy",
-        ].as_slice());
         let country = prop::sample::select(["USA", "Canada", "Mexico"].as_slice());
         let city = prop::sample::select(["New York", "Toronto", "Mexico City"].as_slice());
         let country_code = prop::sample::select(["US", "EN", "FR"].as_slice());
         let now = now_secs().cast_signed();
 
-        (url, country, city, country_code).prop_map(move |(url, country, city, country_code)| {
+        (country, city, country_code).prop_map(move |(country, city, country_code)| {
+            let url = Alphanumeric.sample_string(&mut rand::rng(), 16);
+
             Entry {
-                url: url.to_string(),
+                url,
                 country: country.to_string(),
                 city: city.to_string(),
                 ping: 0,
@@ -368,7 +383,7 @@ mod tests {
             let rt = tokio::runtime::Runtime::new().unwrap();
             rt.block_on(async {
                 let dao = init().await;
-                dao.insert_batch(entries.clone()).await.unwrap();
+                dao.upsert_batch(entries.clone()).await.unwrap();
                 let res_entries = dao.list_except_last_period(Duration::ZERO).await.unwrap();
                 assert_eq!(res_entries.len(), entries.len());
             })
@@ -379,7 +394,7 @@ mod tests {
             let rt = tokio::runtime::Runtime::new().unwrap();
             rt.block_on(async {
                 let dao = init().await;
-                dao.insert_batch(entries.clone()).await.unwrap();
+                dao.upsert_batch(entries.clone()).await.unwrap();
                 let res_entries = dao.get_county_codes_to_cities().await.unwrap();
                 let mut cc_cities  = HashMap::new();
                 entries.into_iter().for_each(|e|{
@@ -395,7 +410,7 @@ mod tests {
             let rt = tokio::runtime::Runtime::new().unwrap();
             rt.block_on(async {
                 let dao = init().await;
-                dao.insert_batch(entries.clone()).await.unwrap();
+                dao.upsert_batch(entries.clone()).await.unwrap();
                 let inserted:HashSet<Id> = dao.list_except_last_period(Duration::ZERO).await.unwrap().into_iter().map(|e|e.id).collect();
                 let to_del: HashSet<Id> = inserted.clone().into_iter().skip(2).take(4).collect();
                 dao.delete(to_del.clone().into_iter().collect()).await.unwrap();
@@ -410,7 +425,7 @@ mod tests {
             let rt = tokio::runtime::Runtime::new().unwrap();
             rt.block_on(async {
                 let dao = init().await;
-                dao.insert_batch(entries.clone()).await.unwrap();
+                dao.upsert_batch(entries.clone()).await.unwrap();
                 let expected: Vec<ExistedEntry> = dao.list(10, None).await.unwrap().into_iter().map(|ee| ExistedEntry{
                     city: "some_city".to_string(),
                     country: "some_country".to_string(),

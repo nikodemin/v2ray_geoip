@@ -1,9 +1,12 @@
+use base64::Engine;
+use base64::engine::general_purpose;
 use dns_lookup::lookup_host;
 use futures::FutureExt;
 use ping as ping_mod;
 use regex::Regex;
 use reqwest::{Client, Error};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::net::IpAddr;
 use std::str::FromStr;
 use std::time::Duration;
@@ -24,22 +27,50 @@ impl Fetcher {
     pub fn parse_link_to_ip(link: &String) -> Option<IpAddr> {
         let host_regex = Regex::new(r"@(.+:\d+)").unwrap();
         let suffix_regex = Regex::new(r":\d+").unwrap();
+        let protocol_regex = Regex::new(r"^.+://").unwrap();
 
-        host_regex
-            .captures(link.as_str())
-            .iter()
-            .flat_map(|captures| captures.get(1).map(|m| m.as_str()))
-            .next()
-            .iter()
-            .flat_map(|s| {
-                IpAddr::from_str(s).ok().or_else(|| {
-                    let host = suffix_regex.replace(s, "");
-                    lookup_host(host.as_ref())
-                        .into_iter()
-                        .flat_map(|mut e| e.next())
-                        .next()
+        let parse = |link: &str| -> Option<IpAddr> {
+            host_regex
+                .captures(link)
+                .iter()
+                .flat_map(|captures| captures.get(1).map(|m| m.as_str()))
+                .next()
+                .iter()
+                .flat_map(|s| {
+                    IpAddr::from_str(s).ok().or_else(|| {
+                        let host = suffix_regex.replace(s, "");
+                        lookup_host(host.as_ref())
+                            .into_iter()
+                            .flat_map(|mut e| e.next())
+                            .next()
+                    })
                 })
-            })
+                .next()
+        };
+
+        if link.contains("@") {
+            parse(link)
+        } else {
+            let bytes = general_purpose::STANDARD
+                .decode(protocol_regex.replace(link, "").as_ref())
+                .ok()?;
+            let json_str = String::from_utf8(bytes).ok()?;
+            let json: Value = serde_json::from_str(json_str.as_str()).ok()?;
+            json["add"]
+                .as_str()
+                .iter()
+                .flat_map(|s| IpAddr::from_str(s).ok())
+                .next()
+        }
+    }
+
+    pub fn parse_protocol(link: &String) -> Option<String> {
+        let protocol_regex = Regex::new(r"^(.+)://").unwrap();
+
+        protocol_regex
+            .captures(link)
+            .iter()
+            .flat_map(|captures| captures.get(1).map(|m| m.as_str().to_string()))
             .next()
     }
 }

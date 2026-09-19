@@ -2515,6 +2515,7 @@ name = "v2ray_geoip"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "base64 0.23.1",
  "clokwerk",
  "config",
  "dns-lookup",
@@ -2524,9 +2525,11 @@ dependencies = [
  "ping",
  "pretty_env_logger",
  "proptest",
+ "rand 0.9.5",
  "regex",
  "reqwest",
  "serde",
+ "serde_json",
  "tokio",
  "tokio-rusqlite",
  "tokio-stream",

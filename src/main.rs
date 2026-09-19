@@ -13,6 +13,7 @@ use config;
 use futures::{FutureExt, StreamExt, TryFutureExt};
 use log::{error, info, warn};
 use serde::{Deserialize, Deserializer};
+use std::collections::HashSet;
 use std::error::Error;
 use std::fmt::Formatter;
 use std::future::pending;
@@ -92,14 +93,17 @@ async fn async_main() -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
                     .flat_map(|v| stream::iter(v))
                     .map(|sub| {
                         let fetcher4 = fetcher3.clone();
-                        match Fetcher::parse_link_to_ip(&sub) {
-                            Some(ip) => {
+                        match (
+                            Fetcher::parse_link_to_ip(&sub),
+                            Fetcher::parse_protocol(&sub),
+                        ) {
+                            (Some(ip), Some(protocol)) => {
                                 info!("Pinging ip: {}", ip);
                                 async move {
                                     fetcher4.ping(ip).map(move |ping| match ping {
                                         Ok(p) => {
                                             info!("Ping result: {}ms", p);
-                                            Some((sub, ip, p))
+                                            Some((sub, ip, p, protocol))
                                         }
                                         Err(err) => {
                                             error!("Unreachable sub: {}, err: {}", sub, err);
@@ -110,7 +114,7 @@ async fn async_main() -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
                                 .flatten()
                                 .boxed()
                             }
-                            None => {
+                            _ => {
                                 warn!("Failed to parse sub: {}", sub);
                                 futures::future::ready(None).boxed()
                             }
@@ -124,7 +128,12 @@ async fn async_main() -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
 
                 while let Some(batch) = par_stream.next().await {
                     match fetcher3
-                        .get_geo(batch.iter().map(|(sub, ip, ping)| ip.to_string()).collect())
+                        .get_geo(
+                            batch
+                                .iter()
+                                .map(|(sub, ip, ping, protocol)| ip.to_string())
+                                .collect(),
+                        )
                         .await
                     {
                         Ok(res) => {
@@ -132,14 +141,14 @@ async fn async_main() -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
                             let entries: Vec<Entry> = res
                                 .into_iter()
                                 .map(move |geo| {
-                                    let (sub, io, ping) = batch
+                                    let (sub, io, ping, protocol) = batch
                                         .iter()
-                                        .find(|(sub, ip, ping)| ip.to_string() == geo.query)
+                                        .find(|(_, ip, _, _)| ip.to_string() == geo.query)
                                         .expect("Illegal state");
                                     Entry {
                                         url: sub.clone(),
                                         ping: ping.clone(),
-                                        protocol: "".to_string(),
+                                        protocol: protocol.clone(),
                                         country_code: geo.country_code,
                                         country: geo.country,
                                         city: geo.city,
@@ -149,7 +158,7 @@ async fn async_main() -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
                                 .collect();
 
                             info!("Inserting batch");
-                            dao3.insert_batch(entries)
+                            dao3.upsert_batch(entries)
                                 .await
                                 .unwrap_or_else(|err| error!("Failed to insert batch: {}", err))
                         }
