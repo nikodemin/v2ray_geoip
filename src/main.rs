@@ -1,7 +1,7 @@
 extern crate core;
 
 use crate::api::Api;
-use crate::dao::{Dao, DaoOps, Entry};
+use crate::dao::{Dao, DaoOps, Entry, ExistedEntry, Id};
 use crate::fetcher::{Fetcher, FetcherOps, GeoResponse};
 use crate::scheduler::{Scheduler, SchedulerOps};
 use crate::utils::{Wrapper, now_secs};
@@ -37,8 +37,8 @@ pub struct Conf {
     geo_base_url: String,
     batch_size: usize,
     port: u16,
-    recheck_period: Wrapper<Interval>,
-    update_period: Wrapper<Interval>,
+    recheck_period: Wrapper<Duration>,
+    update_period: Wrapper<Duration>,
 }
 
 async fn async_main() -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
@@ -61,11 +61,14 @@ async fn async_main() -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
 
     dao.init().await?;
 
+    let fetcher2 = fetcher.clone();
+    let dao2 = dao.clone();
+    let sub_groups = conf.sub_groups.clone();
     let mut update_scheduler = Scheduler::new(
         move || {
-            let fetcher3 = fetcher.clone();
-            let dao3 = dao.clone();
-            let sub_groups = conf.sub_groups.clone();
+            let fetcher3 = fetcher2.clone();
+            let dao3 = dao2.clone();
+            let sub_groups = sub_groups.clone();
             async move {
                 let par_stream = stream::iter(sub_groups)
                     .then(|group| {
@@ -155,12 +158,67 @@ async fn async_main() -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
                 }
             }
         },
-        conf.update_period.0,
+        conf.update_period.into(),
     );
+
+    let dao2 = dao.clone();
+    let fetcher2 = fetcher.clone();
+    let recheck_period = conf.recheck_period.0;
+    let mut recheck_scheduler = Scheduler::new(
+        move || {
+            let dao2 = dao2.clone();
+            let fetcher2 = fetcher2.clone();
+            let recheck_period = recheck_period.clone();
+            async move {
+                match dao2.list_except_last_period(recheck_period).await {
+                    Ok(entries) => {
+                        let res: Vec<Result<ExistedEntry, Id>> = stream::iter(entries)
+                            .map(|ee| {
+                                fetcher2
+                                    .ping(Fetcher::parse_link_to_ip(&ee.url).unwrap())
+                                    .map(move |ping| match ping {
+                                        Ok(p) => {
+                                            info!("Recheck ping result: {}ms", p);
+                                            Ok(ExistedEntry {
+                                                ping: p,
+                                                checked_at: now_secs().cast_signed(),
+                                                ..ee
+                                            })
+                                        }
+                                        Err(err) => {
+                                            error!("Recheck failed. Sub: {}, err: {}", ee.url, err);
+                                            Err(ee.id)
+                                        }
+                                    })
+                            })
+                            .buffer_unordered(conf.batch_size)
+                            .collect()
+                            .await;
+
+                        let (to_update, to_delete): (Vec<_>, Vec<_>) =
+                            res.into_iter().partition(|el| el.is_ok());
+
+                        dao2.delete(to_delete.into_iter().flat_map(|el| el.err()).collect())
+                            .await
+                            .inspect_err(|err| error!("Failed to delete: {}", err));
+                        dao2.update(to_update.into_iter().flat_map(|el| el.ok()).collect())
+                            .await
+                            .inspect_err(|err| error!("Failed to update: {}", err));
+                    }
+                    Err(err) => {
+                        error!("Failed to list entries for recheck. Err: {}", err)
+                    }
+                }
+            }
+        },
+        Wrapper(conf.recheck_period.0).into(),
+    );
+
     update_scheduler.start();
+    recheck_scheduler.start();
     tokio::spawn(update_scheduler.run_task());
 
-    let listener = tokio::net::TcpListener::bind(("0.0.0.0", conf.port)).await.unwrap();
+    let listener = tokio::net::TcpListener::bind(("0.0.0.0", conf.port)).await?;
     axum::serve(listener, router).await?;
 
     Ok(())

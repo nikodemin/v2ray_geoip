@@ -77,15 +77,25 @@ pub struct ExistedEntry {
     pub checked_at: i64,
 }
 
+impl Into<Entry> for ExistedEntry {
+    fn into(self) -> Entry {
+        Entry {
+            url: self.url,
+            ping: self.ping,
+            protocol: self.protocol,
+            country_code: self.country_code,
+            country: self.country,
+            city: self.city,
+            checked_at: self.checked_at,
+        }
+    }
+}
+
 pub trait DaoOps {
     async fn init(&self) -> Result<()>;
     async fn delete(&self, ids: Vec<Id>) -> Result<()>;
     async fn insert_batch(&self, batch: Vec<Entry>) -> Result<()>;
-    async fn list(
-        &self,
-        limit: u32,
-        page: Option<u32>,
-    ) -> Result<Vec<ExistedEntry>>;
+    async fn list(&self, limit: u32, page: Option<u32>) -> Result<Vec<ExistedEntry>>;
     async fn list_by_country_code(
         &self,
         country_code: String,
@@ -103,6 +113,8 @@ pub trait DaoOps {
     async fn get_county_codes_to_cities(&self) -> Result<HashMap<String, HashSet<String>>>;
 
     async fn list_except_last_period(&self, period: Duration) -> Result<Vec<ExistedEntry>>;
+
+    async fn update(&self, entries: Vec<ExistedEntry>) -> Result<()>;
 }
 
 impl DaoOps for Dao {
@@ -170,18 +182,32 @@ impl DaoOps for Dao {
     async fn list(&self, limit: u32, page: Option<u32>) -> Result<Vec<ExistedEntry>> {
         match page {
             Some(p) => {
-                self.connection.call(move |c|{
-                    let mut s =c.prepare(format!("SELECT {} ORDER BY e.ping ASC LIMIT ?1 OFFSET ?2", Self::SELECT_CLAUSE).as_str())?;
-                    s.query_map(params![limit, p], Self::MAPPER)?
-                        .collect()
-                }).await
+                self.connection
+                    .call(move |c| {
+                        let mut s = c.prepare(
+                            format!(
+                                "SELECT {} ORDER BY e.ping ASC LIMIT ?1 OFFSET ?2",
+                                Self::SELECT_CLAUSE
+                            )
+                            .as_str(),
+                        )?;
+                        s.query_map(params![limit, p], Self::MAPPER)?.collect()
+                    })
+                    .await
             }
             None => {
-                self.connection.call(move |c|{
-                    let mut s =c.prepare(format!("SELECT {} ORDER BY e.ping ASC LIMIT ?1", Self::SELECT_CLAUSE).as_str())?;
-                    s.query_map(params![limit], Self::MAPPER)?
-                        .collect()
-                }).await
+                self.connection
+                    .call(move |c| {
+                        let mut s = c.prepare(
+                            format!(
+                                "SELECT {} ORDER BY e.ping ASC LIMIT ?1",
+                                Self::SELECT_CLAUSE
+                            )
+                            .as_str(),
+                        )?;
+                        s.query_map(params![limit], Self::MAPPER)?.collect()
+                    })
+                    .await
             }
         }
     }
@@ -280,6 +306,18 @@ impl DaoOps for Dao {
             })
             .await
     }
+
+    async fn update(&self, entries: Vec<ExistedEntry>) -> Result<()> {
+        self.connection
+            .call(move |c| {
+                for e in entries {
+                    let mut s = c.prepare("UPDATE entries SET url=?1, ping=?2, country_code=?3, country=?4, city=?5, protocol=?6, checked_at=?7 WHERE id = ?8")?;
+                    s.execute(params![e.url, e.ping, e.country_code, e.country, e.city, e.protocol, e.checked_at, e.id])?;
+                }
+                Ok(())
+            })
+            .await
+    }
 }
 #[cfg(test)]
 mod tests {
@@ -364,6 +402,26 @@ mod tests {
                 let res: HashSet<Id> = dao.list_except_last_period(Duration::ZERO).await.unwrap().iter().map(|e|e.id).collect();
 
                 assert_eq!(res, inserted.difference(&to_del).cloned().collect());
+            })
+        }
+
+        #[test]
+        fn insert_and_update(entries in vec_gen(entry())) {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async {
+                let dao = init().await;
+                dao.insert_batch(entries.clone()).await.unwrap();
+                let expected: Vec<ExistedEntry> = dao.list(10, None).await.unwrap().into_iter().map(|ee| ExistedEntry{
+                    city: "some_city".to_string(),
+                    country: "some_country".to_string(),
+                    ping: 10,
+                    country_code: "cc".to_string(),
+                    ..ee
+                }).collect();
+                dao.update(expected.clone()).await.unwrap();
+                let actual = dao.list(10, None).await.unwrap();
+
+                assert_eq!(expected, actual);
             })
         }
     }
