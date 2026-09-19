@@ -4,7 +4,9 @@ use dns_lookup::lookup_host;
 use futures::FutureExt;
 use ping as ping_mod;
 use regex::Regex;
-use reqwest::{Client, Error};
+use reqwest_middleware::{ClientBuilder, ClientWithMiddleware, Error};
+use reqwest_retry::RetryTransientMiddleware;
+use reqwest_retry::policies::ExponentialBackoff;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::net::IpAddr;
@@ -13,14 +15,20 @@ use std::time::Duration;
 
 pub struct Fetcher {
     geo_base_ip: String,
-    client: Client,
+    client: ClientWithMiddleware,
 }
 
 impl Fetcher {
-    pub fn new(geo_base_ip: String) -> Self {
+    pub fn new(geo_base_ip: String, retries: u32) -> Self {
+        let retry_policy = ExponentialBackoff::builder().build_with_max_retries(retries);
+
+        let client: ClientWithMiddleware = ClientBuilder::new(reqwest::Client::new())
+            .with(RetryTransientMiddleware::new_with_policy(retry_policy))
+            .build();
+
         Fetcher {
             geo_base_ip,
-            client: Client::new(),
+            client,
         }
     }
 
@@ -94,7 +102,10 @@ pub struct GeoResponse {
 pub trait FetcherOps {
     async fn get_subs(&self, url: String) -> Result<Vec<String>, Error>;
     async fn ping(&self, ip: IpAddr) -> Result<i64, ping_mod::Error>;
-    async fn get_geo(&self, ips: Vec<String>) -> Result<Vec<GeoResponse>, Error>;
+    async fn get_geo(
+        &self,
+        ips: Vec<String>,
+    ) -> Result<Vec<GeoResponse>, Box<dyn std::error::Error + Send + Sync>>;
 }
 
 impl FetcherOps for Fetcher {
@@ -126,7 +137,10 @@ impl FetcherOps for Fetcher {
         }
     }
 
-    async fn get_geo(&self, ips: Vec<String>) -> Result<Vec<GeoResponse>, Error> {
+    async fn get_geo(
+        &self,
+        ips: Vec<String>,
+    ) -> Result<Vec<GeoResponse>, Box<dyn std::error::Error + Send + Sync>> {
         let req: Vec<GeoRequest> = ips
             .into_iter()
             .map(|ip| GeoRequest {
@@ -136,14 +150,17 @@ impl FetcherOps for Fetcher {
             })
             .collect();
 
-        self.client
+        let res = self
+            .client
             .post(self.geo_base_ip.clone() + "/batch")
             .json(&req)
             .timeout(Duration::from_secs(5))
             .send()
             .await?
             .json::<Vec<GeoResponse>>()
-            .await
+            .await?;
+
+        Ok(res)
     }
 }
 

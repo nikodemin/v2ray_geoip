@@ -38,6 +38,7 @@ pub struct Conf {
     geo_base_url: String,
     batch_size: usize,
     port: u16,
+    retries: u32,
     recheck_period: Wrapper<Duration>,
     update_period: Wrapper<Duration>,
 }
@@ -53,7 +54,7 @@ async fn async_main() -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
 
     let conn = Connection::open("./db.db3").await?;
     let dao = Arc::new(Dao::new(conn));
-    let fetcher = Arc::new(Fetcher::new(conf.geo_base_url.clone()));
+    let fetcher = Arc::new(Fetcher::new(conf.geo_base_url.clone(), conf.retries));
 
     let router = Router::new()
         .route("/subs", get(Api::get_subs))
