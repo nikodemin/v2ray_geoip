@@ -1,7 +1,7 @@
 sub_groups=["https://raw.githubusercontent.com/barry-far/V2ray-Config/refs/heads/main/Sub1.txt", "https://raw.githubusercontent.com/barry-far/V2ray-Config/refs/heads/main/Sub2.txt"]
 geo_base_url="http://ip-api.com"
 batch_size=20
-recheck_period="5 m"
 update_period="30 m"
+recheck_period="5 m"
 retries=7
 port=3000
