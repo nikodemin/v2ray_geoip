@@ -1,7 +1,11 @@
 [package]
-name = "v2ray_geoip"
+name = "v2ray-geoip"
 version = "0.1.0"
 edition = "2024"
+license = "Apache-2.0"
+description = "V2Ray subscription fetcher with geo localization functionality"
+readme = "README.md"
+repository = "https://github.com/nikodemin/v2ray_geoip"
 
 [dependencies]
 ping = { version = "0.9.0" , features = ["tokio"]}
