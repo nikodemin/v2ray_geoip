@@ -1,5 +1,5 @@
 [workspace]
-members = ["v2ray-geoip"]
+members = ["cargo:v2ray-geoip"]
 
 # Config for 'dist'
 [dist]
