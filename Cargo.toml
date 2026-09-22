@@ -40,7 +40,3 @@ reqwest-middleware = { version = "0.5.2" , features = ["json"]}
 [profile.dist]
 inherits = "release"
 lto = "thin"
-
-[package.metadata.dist]
-targets = ["x86_64-unknown-linux-gnu", "aarch64-apple-darwin", "x86_64-pc-windows-msvc"]
-
