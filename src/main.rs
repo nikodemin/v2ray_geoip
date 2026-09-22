@@ -11,7 +11,7 @@ use axum::routing::get;
 use clokwerk::Interval;
 use config;
 use futures::{FutureExt, StreamExt, TryFutureExt};
-use log::{error, info, warn};
+use log::{debug, error, info, warn};
 use serde::{Deserialize, Deserializer};
 use std::collections::HashSet;
 use std::error::Error;
@@ -99,15 +99,15 @@ async fn async_main() -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
                             Fetcher::parse_protocol(&sub),
                         ) {
                             (Some(ip), Some(protocol)) => {
-                                info!("Pinging ip: {}", ip);
+                                debug!("Pinging ip: {}", ip);
                                 async move {
                                     fetcher4.ping(ip).map(move |ping| match ping {
                                         Ok(p) => {
-                                            info!("Ping result: {}ms", p);
+                                            debug!("Ping result: {}ms", p);
                                             Some((sub, ip, p, protocol))
                                         }
                                         Err(err) => {
-                                            error!("Unreachable sub: {}, err: {}", sub, err);
+                                            debug!("Unreachable sub: {}, err: {}", sub, err);
                                             None
                                         }
                                     })
@@ -183,12 +183,12 @@ async fn async_main() -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
                 match dao2.list_except_last_period(recheck_period).await {
                     Ok(entries) => {
                         let res: Vec<Result<ExistedEntry, Id>> = stream::iter(entries)
-                            .map(|ee| {
-                                fetcher2
-                                    .ping(Fetcher::parse_link_to_ip(&ee.url).unwrap())
+                            .map(|ee| match Fetcher::parse_link_to_ip(&ee.url) {
+                                Some(ip) => fetcher2
+                                    .ping(ip)
                                     .map(move |ping| match ping {
                                         Ok(p) => {
-                                            info!("Recheck ping result: {}ms", p);
+                                            debug!("Recheck ping result: {}ms", p);
                                             Ok(ExistedEntry {
                                                 ping: p,
                                                 checked_at: now_secs().cast_signed(),
@@ -196,10 +196,15 @@ async fn async_main() -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
                                             })
                                         }
                                         Err(err) => {
-                                            error!("Recheck failed. Sub: {}, err: {}", ee.url, err);
+                                            warn!("Recheck failed. Sub: {}, err: {}", ee.url, err);
                                             Err(ee.id)
                                         }
                                     })
+                                    .boxed(),
+                                None => {
+                                    warn!("Failed to parse ip for recheck. Sub: {}", ee.url);
+                                    futures::future::ready(Err(ee.id)).boxed()
+                                }
                             })
                             .buffer_unordered(conf.batch_size)
                             .collect()
@@ -208,12 +213,21 @@ async fn async_main() -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
                         let (to_update, to_delete): (Vec<_>, Vec<_>) =
                             res.into_iter().partition(|el| el.is_ok());
 
-                        dao2.delete(to_delete.into_iter().flat_map(|el| el.err()).collect())
-                            .await
-                            .inspect_err(|err| error!("Failed to delete: {}", err));
-                        dao2.update(to_update.into_iter().flat_map(|el| el.ok()).collect())
-                            .await
-                            .inspect_err(|err| error!("Failed to update: {}", err));
+                        let to_delete: Vec<Id> =
+                            to_delete.into_iter().flat_map(|el| el.err()).collect();
+                        let to_delete_len = to_delete.len();
+                        match dao2.delete(to_delete).await {
+                            Ok(()) => info!("Deleted subs count: {}", to_delete_len),
+                            Err(err) => error!("Failed to delete: {}", err),
+                        };
+
+                        let to_update: Vec<ExistedEntry> =
+                            to_update.into_iter().flat_map(|el| el.ok()).collect();
+                        let to_update_len = to_update.len();
+                        match dao2.update(to_update).await {
+                            Ok(()) => info!("Updated subs count: {}", to_update_len),
+                            Err(err) => error!("Failed to update: {}", err),
+                        }
                     }
                     Err(err) => {
                         error!("Failed to list entries for recheck. Err: {}", err)
