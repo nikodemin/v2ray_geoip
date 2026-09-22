@@ -6,6 +6,13 @@ license = "Apache-2.0"
 description = "V2Ray subscription fetcher with geo localization functionality"
 readme = "README.md"
 repository = "https://github.com/nikodemin/v2ray_geoip"
+authors = ["Nikita Dyomin"]
+
+[package.metadata.wix]
+upgrade-guid = "4EF0FE7E-CF1C-4960-A73D-0DCAC59E963B"
+path-guid = "C6DA6C1F-F2DC-4E27-971B-058C485F9248"
+license = false
+eula = false
 
 [dependencies]
 ping = { version = "0.9.0" , features = ["tokio"]}
@@ -29,4 +36,9 @@ base64 = "0.23.1"
 serde_json = "1.0.151"
 reqwest-retry = "0.9.1"
 reqwest-middleware = { version = "0.5.2" , features = ["json"]}
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
 
