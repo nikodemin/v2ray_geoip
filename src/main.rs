@@ -95,13 +95,13 @@ async fn async_main() -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
                     .map(|sub| {
                         let fetcher4 = fetcher3.clone();
                         match (
-                            Fetcher::parse_link_to_ip(&sub),
+                            Fetcher::parse_link_to_ip_and_port(&sub),
                             Fetcher::parse_protocol(&sub),
                         ) {
-                            (Some(ip), Some(protocol)) => {
+                            (Some((ip, port)), Some(protocol)) => {
                                 debug!("Pinging ip: {}", ip);
                                 async move {
-                                    fetcher4.ping(ip).map(move |ping| match ping {
+                                    fetcher4.ping(ip, port).map(move |ping| match ping {
                                         Ok(p) => {
                                             debug!("Ping result: {}ms", p);
                                             Some((sub, ip, p, protocol))
@@ -183,9 +183,9 @@ async fn async_main() -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
                 match dao2.list_except_last_period(recheck_period).await {
                     Ok(entries) => {
                         let res: Vec<Result<ExistedEntry, Id>> = stream::iter(entries)
-                            .map(|ee| match Fetcher::parse_link_to_ip(&ee.url) {
-                                Some(ip) => fetcher2
-                                    .ping(ip)
+                            .map(|ee| match Fetcher::parse_link_to_ip_and_port(&ee.url) {
+                                Some((ip, port)) => fetcher2
+                                    .ping(ip, port)
                                     .map(move |ping| match ping {
                                         Ok(p) => {
                                             debug!("Recheck ping result: {}ms", p);

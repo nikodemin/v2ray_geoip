@@ -61,3 +61,10 @@ pub fn now_secs() -> u64 {
         .expect("Time went backwards")
         .as_secs()
 }
+
+pub fn now_millis() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("Time went backwards")
+        .as_millis()
+}
