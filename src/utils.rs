@@ -1,6 +1,7 @@
 use clokwerk::Interval;
 use serde::{Deserialize, Deserializer};
 use std::fmt::Formatter;
+use std::fs;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub struct Wrapper<T>(pub T);
@@ -67,4 +68,73 @@ pub fn now_millis() -> u128 {
         .duration_since(UNIX_EPOCH)
         .expect("Time went backwards")
         .as_millis()
+}
+
+pub fn write_config() -> std::io::Result<()> {
+    fs::exists("conf.toml")
+        .and_then(|conf_exists| {
+            if conf_exists {
+                Ok(())
+            } else {
+                fs::write(
+                    "conf.toml",
+                    r#"sub_groups = [
+    "https://raw.githubusercontent.com/barry-far/V2ray-Config/refs/heads/main/Sub1.txt",
+    "https://raw.githubusercontent.com/barry-far/V2ray-Config/refs/heads/main/Sub2.txt",
+    "https://raw.githubusercontent.com/barry-far/V2ray-Config/refs/heads/main/Sub3.txt",
+    "https://raw.githubusercontent.com/barry-far/V2ray-Config/refs/heads/main/Sub4.txt",
+    "https://raw.githubusercontent.com/barry-far/V2ray-Config/refs/heads/main/Sub5.txt",
+    "https://raw.githubusercontent.com/barry-far/V2ray-Config/refs/heads/main/Sub6.txt",
+    "https://raw.githubusercontent.com/barry-far/V2ray-Config/refs/heads/main/Sub7.txt",
+    "https://raw.githubusercontent.com/barry-far/V2ray-Config/refs/heads/main/Sub8.txt",
+    "https://raw.githubusercontent.com/barry-far/V2ray-Config/refs/heads/main/Sub9.txt",
+    "https://raw.githubusercontent.com/barry-far/V2ray-Config/refs/heads/main/Sub10.txt",
+    "https://raw.githubusercontent.com/barry-far/V2ray-Config/refs/heads/main/Sub11.txt",
+    "https://raw.githubusercontent.com/barry-far/V2ray-Config/refs/heads/main/Sub12.txt",
+    "https://raw.githubusercontent.com/barry-far/V2ray-Config/refs/heads/main/Sub13.txt",
+    "https://raw.githubusercontent.com/barry-far/V2ray-Config/refs/heads/main/Sub14.txt",
+    "https://raw.githubusercontent.com/barry-far/V2ray-Config/refs/heads/main/Sub15.txt",
+    "https://raw.githubusercontent.com/barry-far/V2ray-Config/refs/heads/main/Sub16.txt",
+]
+geo_base_url = "http://ip-api.com"
+batch_size = 50
+update_period = "1 h"
+recheck_period = "10 m"
+retries = 7
+port = 3000"#,
+                )
+            }
+        })
+        .and_then(|_| {
+            fs::exists("log4rs.yml").and_then(|log_exists| {
+                if log_exists {
+                    Ok(())
+                } else {
+                    fs::write(
+                        "log4rs.yml",
+                        r#"appenders:
+  stdout:
+    kind: console
+    encoder:
+      pattern: "{d} - {l} - {f}:{L} - {m}{n}"
+  file:
+    kind: rolling_file
+    path: "log/app.log"
+    encoder:
+      pattern: "{d} - {l} - {f}:{L} - {m}{n}"
+    policy:
+      trigger:
+        kind: size
+        limit: 100 mb
+      roller:
+        kind: delete
+root:
+  level: info
+  appenders:
+    - stdout
+    - file"#,
+                    )
+                }
+            })
+        })
 }

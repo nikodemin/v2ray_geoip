@@ -4,7 +4,7 @@ use crate::api::Api;
 use crate::dao::{Dao, DaoOps, Entry, ExistedEntry, Id};
 use crate::fetcher::{Fetcher, FetcherOps, GeoResponse};
 use crate::scheduler::{Scheduler, SchedulerOps};
-use crate::utils::{Wrapper, now_secs};
+use crate::utils::{Wrapper, now_secs, write_config};
 use axum::Router;
 use axum::extract::Query;
 use axum::routing::get;
@@ -44,6 +44,7 @@ pub struct Conf {
 }
 
 async fn async_main() -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
+    write_config()?;
     let conf: Conf = config::Config::builder()
         .add_source(config::File::with_name("conf.toml"))
         .build()?
